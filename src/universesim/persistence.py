@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from typing import Union
 
-from .physics import World
+from .physics import G_AU_MSUN_DAY, World
 
 SCHEMA_VERSION = 1
 
@@ -22,6 +22,7 @@ def world_to_dict(world: World) -> dict:
         "version": SCHEMA_VERSION,
         "units": {"length": "AU", "mass": "Msun", "time": "day"},
         "time": world.time,
+        "g": world.g,
         "softening": world.softening,
         "bodies": [
             {
@@ -41,7 +42,8 @@ def world_from_dict(data: dict) -> World:
     if version != SCHEMA_VERSION:
         raise ValueError(f"Unsupported scenario version: {version!r}")
 
-    world = World(softening=float(data.get("softening", 0.0)))
+    world = World(g=float(data.get("g", G_AU_MSUN_DAY)),
+                  softening=float(data.get("softening", 0.0)))
     for body in data["bodies"]:
         world.add_body(
             mass=body["mass"],

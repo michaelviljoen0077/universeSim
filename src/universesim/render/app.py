@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 from direct.showbase.ShowBase import ShowBase
 from panda3d.core import (
@@ -72,6 +72,14 @@ _SPAWN_VEL_GAIN = 0.012                # AU/day of velocity per AU of drag
 
 _SAVE_PATH = Path("universesim_save.json")
 
+# Integrator step control. The physics step is capped so fast time rates stay
+# stable (inner planets need many steps per orbit), and a frame's wall-clock dt is
+# capped so a stall (window drag, texture load) can't launch one giant step.
+_MAX_STEP_DAYS = 0.25
+_MIN_SUBSTEPS = 8
+_MAX_SUBSTEPS = 500
+_MAX_FRAME_DT = 0.1
+
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
@@ -87,19 +95,22 @@ def _display_radius(physical_radius_au: float, is_star: bool) -> float:
 class UniverseApp(ShowBase):
     """The interactive sandbox window."""
 
-    def __init__(self, world: Optional[World] = None, headless: bool = False) -> None:
+    def __init__(self, world: Optional[World] = None, headless: bool = False,
+                 scenario_factory: Optional[Callable[[], World]] = None) -> None:
         if headless:
             loadPrcFileData("", "window-type none")
         loadPrcFileData("", "window-title UniverseSim")
+        loadPrcFileData("", "audio-library-name null")  # the sim has no sound
         super().__init__()
 
         # In headless mode ``win`` may be absent entirely (not just None).
         self.has_window = getattr(self, "win", None) is not None
 
-        self.world = world if world is not None else solar_system()
+        # The factory drives the Reset button and the scenario menu's initial item.
+        self._scenario_factory = scenario_factory or solar_system
+        self.world = world if world is not None else self._scenario_factory()
         self.sim_speed = 40.0
         self.paused = False
-        self._substeps = 8
 
         # Body bookkeeping keyed by stable id.
         self.node_by_id: Dict[int, NodePath] = {}
@@ -113,7 +124,6 @@ class UniverseApp(ShowBase):
         self.selected_id: Optional[int] = None
         self.follow_id: Optional[int] = None   # body the camera is locked onto
         self.ui = None
-        self._scenario_factory = solar_system  # for the Reset button
 
         # Orbit camera.
         self.cam_target = Vec3(0, 0, 0)
@@ -135,6 +145,9 @@ class UniverseApp(ShowBase):
             import simplepbr
             self.pbr_pipeline = simplepbr.init()
             self.disable_mouse()
+            # The default near plane (1 AU) clips a body you've focused and zoomed in
+            # on; the far plane still has to enclose the skybox.
+            self.camLens.set_near_far(0.005, 20000.0)
             self.setBackgroundColor(0.01, 0.01, 0.02)
             self._setup_sky()
             self.trail_root = self.render.attach_new_node("trails")
@@ -164,7 +177,9 @@ class UniverseApp(ShowBase):
         if self.world.count == 0:
             return 3.0
         extent = float(max((Vec3(*p).length() for p in self.world.position), default=1.0))
-        return _clamp(1.4 * extent, 2.0, 500.0)
+        # Far enough that a small system (e.g. 1 AU) fits beside the UI panels; the
+        # cap keeps the inner planets visible in the full Solar System.
+        return _clamp(4.0 * extent, 2.0, 45.0)
 
     def _reconcile_bodies(self) -> None:
         """Make the scene graph + bookkeeping match the World's current bodies.
@@ -189,18 +204,22 @@ class UniverseApp(ShowBase):
                 name = self.world.names[idx]
                 color = _BODY_COLORS.get(name, _DEFAULT_COLOR)
                 self.color_by_id[bid] = color
-                node = self._create_body_node(name, color, disp_r, is_star)
+                node = self._create_body_node(name, color, is_star)
                 node.reparent_to(self.render)
                 node.set_pos(Vec3(*self.world.position[idx]))
                 self.node_by_id[bid] = node
-                self.trail_by_id[bid] = deque(maxlen=self.trail_max)
-            else:
-                self.node_by_id[bid].set_scale(disp_r)  # radius may have grown via merge
+                self.trail_by_id.setdefault(bid, deque(maxlen=self.trail_max))
+            # Geometry is a unit sphere; the node's scale is the display radius (which
+            # may have grown via a merge or an edit).
+            self.node_by_id[bid].set_scale(disp_r)
 
-    def _create_body_node(self, name: str, color: tuple, disp_r: float,
-                          is_star: bool) -> NodePath:
-        """Build a body's sphere with texture (if available), and star/atmosphere FX."""
-        node = make_uv_sphere(radius=disp_r, name=name)
+    def _create_body_node(self, name: str, color: tuple, is_star: bool) -> NodePath:
+        """Build a body's unit sphere with texture (if available) and star/atmosphere FX.
+
+        Child effects are sized relative to the unit sphere, so they follow the node's
+        scale (the display radius).
+        """
+        node = make_uv_sphere(radius=1.0, name=name)
         node.set_material(self._make_material(color, emissive=is_star), 1)
 
         texture_path = assets.texture_for_body(name) if self.has_window else None
@@ -219,14 +238,14 @@ class UniverseApp(ShowBase):
             node.set_light_off()
             node.set_shader_off(1)
             if self.has_window:
-                make_glow_sprite(color=color, size=disp_r * 7.0).reparent_to(node)
+                make_glow_sprite(color=color, size=4.0).reparent_to(node)
         elif self.has_window and name in _ATMOSPHERE:
-            self._add_atmosphere(node, disp_r, _ATMOSPHERE[name])
+            self._add_atmosphere(node, _ATMOSPHERE[name])
 
         return node
 
-    def _add_atmosphere(self, parent: NodePath, disp_r: float, tint: tuple) -> None:
-        shell = make_uv_sphere(radius=disp_r * 1.08, lat_segments=16, lon_segments=24,
+    def _add_atmosphere(self, parent: NodePath, tint: tuple) -> None:
+        shell = make_uv_sphere(radius=1.08, lat_segments=16, lon_segments=24,
                                name="atmosphere")
         shell.set_two_sided(True)
         shell.set_light_off()
@@ -284,16 +303,28 @@ class UniverseApp(ShowBase):
         self.accept("mouse3-up", self._on_right_up)
         self.accept("wheel_up", self._zoom, [1 / 1.1])
         self.accept("wheel_down", self._zoom, [1.1])
-        self.accept("space", self._toggle_pause)
-        self.accept("t", self._toggle_trails)
-        self.accept("delete", self._delete_selected)
-        self.accept("]", self._edit_mass, [2.0])
-        self.accept("[", self._edit_mass, [0.5])
-        self.accept("arrow_up", self._scale_speed, [2.0])
-        self.accept("arrow_down", self._scale_speed, [0.5])
-        self.accept("f5", self._save)
-        self.accept("f9", self._load)
-        self.accept("escape", self.user_exit)
+        self._accept_key("space", self._toggle_pause)
+        self._accept_key("t", self._toggle_trails)
+        self._accept_key("delete", self._delete_selected)
+        self._accept_key("]", self._edit_mass, 2.0)
+        self._accept_key("[", self._edit_mass, 0.5)
+        self._accept_key("arrow_up", self._scale_speed, 2.0)
+        self._accept_key("arrow_down", self._scale_speed, 0.5)
+        self._accept_key("f5", self._save)
+        self._accept_key("f9", self._load)
+        self._accept_key("escape", self.user_exit)
+
+    def _accept_key(self, event: str, handler, *args) -> None:
+        """Bind a hotkey that is ignored while the user is typing in a text field.
+
+        Otherwise typing e.g. "t" or pressing Delete in the inspector's Name box would
+        toggle trails or delete the selected body.
+        """
+        def _guarded():
+            if self.ui is not None and self.ui.typing:
+                return
+            handler(*args)
+        self.accept(event, _guarded)
 
     def _on_left_down(self) -> None:
         self._rotating = True
@@ -322,10 +353,7 @@ class UniverseApp(ShowBase):
         self.paused = not self.paused
 
     def _toggle_trails(self) -> None:
-        self.show_trails = not self.show_trails
-        if not self.show_trails and self._trail_geom is not None:
-            self._trail_geom.remove_node()
-            self._trail_geom = None
+        self.set_trails(not self.show_trails)
 
     def _scale_speed(self, factor: float) -> None:
         self.sim_speed = _clamp(self.sim_speed * factor, 0.1, 100000.0)
@@ -338,19 +366,25 @@ class UniverseApp(ShowBase):
         if idx < 0:
             return
         self.world.mass[idx] *= factor
-        self.world._acc = None  # forces depend on mass
+        self.world.invalidate_forces()  # forces depend on mass
 
     # -- public API used by the UI -----------------------------------------
+    @property
+    def scenario_name(self) -> Optional[str]:
+        """Display name of the active scenario preset (None if it isn't registered)."""
+        for name, factory in SCENARIO_REGISTRY.items():
+            if factory is self._scenario_factory:
+                return name
+        return None
+
     def set_scenario(self, name: str) -> None:
         factory = SCENARIO_REGISTRY.get(name)
         if factory is None:
             return
         self._scenario_factory = factory
-        self.follow_id = None
         self.load_world(factory())
 
     def reset_scenario(self) -> None:
-        self.follow_id = None
         self.load_world(self._scenario_factory())
 
     def set_trails(self, on: bool) -> None:
@@ -400,15 +434,10 @@ class UniverseApp(ShowBase):
                 node.set_name(name)
         if mass_earths is not None:
             self.world.mass[idx] = max(1e-12, float(mass_earths)) * EARTH_MASS_MSUN
-            self.world._acc = None
+            self.world.invalidate_forces()
         if radius_km is not None:
             self.world.radius[idx] = max(1.0, float(radius_km)) * AU_PER_KM
-            new_disp = _display_radius(float(self.world.radius[idx]),
-                                       self.selected_id == self.star_id)
-            self.disp_by_id[self.selected_id] = new_disp
-            node = self.node_by_id.get(self.selected_id)
-            if node is not None:
-                node.set_scale(new_disp)
+            self._reconcile_bodies()  # rescales the node to the new display radius
 
     def focus_selected(self) -> None:
         if self.selected_id is not None:
@@ -530,6 +559,10 @@ class UniverseApp(ShowBase):
         self.world = world
         self.star_id = self._initial_star_id()
         self._select(None)
+        # Ids restart in the new world, so an old follow id could latch onto an
+        # unrelated body.
+        self.follow_id = None
+        self.cam_target = Vec3(0, 0, 0)
         self.cam_distance = self._fit_distance()
         self._refresh_id_index()
         self._reconcile_bodies()
@@ -537,9 +570,11 @@ class UniverseApp(ShowBase):
     # -- per-frame update ---------------------------------------------------
     def _update(self, task):
         if not self.paused and self.world.count:
-            sim_dt = _globalClock.get_dt() * self.sim_speed
-            step = sim_dt / self._substeps
-            for _ in range(self._substeps):
+            sim_dt = min(_globalClock.get_dt(), _MAX_FRAME_DT) * self.sim_speed
+            substeps = int(_clamp(math.ceil(sim_dt / _MAX_STEP_DAYS),
+                                  _MIN_SUBSTEPS, _MAX_SUBSTEPS))
+            step = sim_dt / substeps
+            for _ in range(substeps):
                 self.world.step(step)
             events = self.world.resolve_collisions()
             self._refresh_id_index()
@@ -561,10 +596,26 @@ class UniverseApp(ShowBase):
         return task.cont
 
     def _handle_merges(self, events) -> None:
-        # Follow selection onto the survivor if the selected body was absorbed.
+        # Map each absorbed id to its final survivor (merges can chain in one frame).
         absorbed = {a: s for s, a in events}
-        if self.selected_id in absorbed:
-            self.selected_id = absorbed[self.selected_id]
+
+        def survivor(bid):
+            while bid in absorbed:
+                bid = absorbed[bid]
+            return bid
+
+        # Selection, camera focus, and star identity all follow the survivor.
+        if self.selected_id is not None:
+            self.selected_id = survivor(self.selected_id)
+        if self.follow_id is not None:
+            self.follow_id = survivor(self.follow_id)
+        new_star = survivor(self.star_id)
+        if new_star != self.star_id:
+            self.star_id = new_star
+            # Rebuild the survivor's node so it renders as the (emissive) star.
+            node = self.node_by_id.pop(new_star, None)
+            if node is not None:
+                node.remove_node()
         self._reconcile_bodies()
 
     def _sync_positions(self) -> None:

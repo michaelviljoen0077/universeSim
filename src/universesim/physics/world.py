@@ -75,6 +75,10 @@ class World:
         del self.ids[index]
         self._acc = None
 
+    def invalidate_forces(self) -> None:
+        """Drop the cached acceleration. Call after editing masses or positions directly."""
+        self._acc = None
+
     def index_of(self, body_id: int) -> int:
         """Current array index of a body by its stable id (-1 if it's gone)."""
         try:
