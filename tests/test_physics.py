@@ -165,3 +165,13 @@ def test_save_load_roundtrip(tmp_path):
     assert restored.time == pytest.approx(world.time)
     assert np.allclose(restored.position, world.position)
     assert np.allclose(restored.velocity, world.velocity)
+
+
+def test_save_load_preserves_constants(tmp_path):
+    from universesim import persistence
+
+    world = World(g=1.0, softening=0.01)
+    world.add_body(mass=1.0, position=[0, 0, 0], velocity=[0, 0, 0])
+    restored = persistence.load_world(persistence.save_world(world, tmp_path / "s.json"))
+    assert restored.g == pytest.approx(1.0)
+    assert restored.softening == pytest.approx(0.01)

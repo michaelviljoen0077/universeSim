@@ -19,13 +19,14 @@ def main(argv=None) -> int:
                         help="Headless only: number of frames to step before exiting.")
     args = parser.parse_args(argv)
 
-    world = SCENARIOS[args.scenario]()
+    factory = SCENARIOS[args.scenario]
+    world = factory()
 
     # Import the renderer lazily so headless physics work doesn't require a GPU import
     # to *parse*, and so an import error surfaces with a clear message.
     from universesim.render.app import UniverseApp
 
-    app = UniverseApp(world=world, headless=args.headless)
+    app = UniverseApp(world=world, headless=args.headless, scenario_factory=factory)
 
     if args.headless:
         for _ in range(args.frames):

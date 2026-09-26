@@ -10,3 +10,4 @@ build/
 dist/
 *.log
 .env
+universesim_save.json

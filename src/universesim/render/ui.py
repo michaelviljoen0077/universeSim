@@ -34,6 +34,7 @@ _CLEAR = (0, 0, 0, 0)
 class GameUI:
     def __init__(self, app) -> None:
         self.app = app
+        self.typing = False        # a text field has focus -> app hotkeys are muted
         self._shown_id = object()  # sentinel forces an initial populate
         self._build_bottom_bar()
         self._build_top_bar()
@@ -60,8 +61,13 @@ class GameUI:
     def _entry(self, parent, pos, width=9, command=None):
         return DirectEntry(parent=parent, scale=0.045, pos=pos, width=width,
                            frameColor=(0.02, 0.02, 0.04, 1.0), text_fg=_TXT,
-                           initialText="", numLines=1, focusInCommand=lambda: None,
+                           initialText="", numLines=1,
+                           focusInCommand=self._set_typing, focusInExtraArgs=[True],
+                           focusOutCommand=self._set_typing, focusOutExtraArgs=[False],
                            command=command or (lambda _t=None: None))
+
+    def _set_typing(self, value: bool) -> None:
+        self.typing = value
 
     # -- bottom playback bar ------------------------------------------------
     def _build_bottom_bar(self) -> None:
@@ -85,9 +91,12 @@ class GameUI:
                             frameSize=(0.0, 0.62, -0.46, 0.0), pos=(0.03, 0, -0.03))
         self._label(panel, "UNIVERSE SIM", (0.05, 0, -0.06), scale=0.05, fg=_ACCENT)
         self._label(panel, "Scenario", (0.05, 0, -0.13))
+        items = list(REGISTRY)
+        current = self.app.scenario_name
         self.scenario_menu = DirectOptionMenu(
             parent=panel, scale=0.05, pos=(0.05, 0, -0.21),
-            items=list(REGISTRY), initialitem=0, command=self.app.set_scenario,
+            items=items, initialitem=items.index(current) if current in items else 0,
+            command=self.app.set_scenario,
             frameColor=_BTN, text_fg=_TXT, highlightColor=_BTN_HI,
             relief=DGG.FLAT, text_scale=0.9, popupMarkerBorder=(0, 0))
         self._button(panel, "+ Add Body", (0.2, 0, -0.31), self.app.spawn_at_target, width=3.2)
@@ -103,11 +112,12 @@ class GameUI:
                                       scale=0.05, fg=_ACCENT)
 
         self._label(panel, "Name", (-0.62, 0, 0.34))
-        self.name_entry = self._entry(panel, (-0.62, 0, 0.27))
+        # Pressing Enter in any field applies the edits, same as the Apply button.
+        self.name_entry = self._entry(panel, (-0.62, 0, 0.27), command=self._apply)
         self._label(panel, "Mass (Earths)", (-0.62, 0, 0.16))
-        self.mass_entry = self._entry(panel, (-0.62, 0, 0.09))
+        self.mass_entry = self._entry(panel, (-0.62, 0, 0.09), command=self._apply)
         self._label(panel, "Radius (km)", (-0.62, 0, -0.02))
-        self.radius_entry = self._entry(panel, (-0.62, 0, -0.09))
+        self.radius_entry = self._entry(panel, (-0.62, 0, -0.09), command=self._apply)
 
         self._button(panel, "Apply", (-0.46, 0, -0.22), self._apply, width=2.4)
         self._button(panel, "Focus", (-0.18, 0, -0.22), self.app.focus_selected, width=2.4)
@@ -123,16 +133,20 @@ class GameUI:
     def _set_trails(self, value) -> None:
         self.app.set_trails(bool(value))
 
-    def _apply(self) -> None:
+    def _apply(self, _text=None) -> None:
         name = self.name_entry.get().strip()
         mass = _to_float(self.mass_entry.get())
         radius = _to_float(self.radius_entry.get())
         self.app.apply_edits(name=name or None, mass_earths=mass, radius_km=radius)
+        self._shown_id = object()  # repopulate so the fields show the clamped values
 
     # -- per-frame refresh --------------------------------------------------
     def update(self) -> None:
         self.pause_btn["text"] = "Play" if self.app.paused else "Pause"
         self.speed_lbl["text"] = f"{self.app.sim_speed:.0f} d/s"
+        # Keep the checkbox in step with the "T" hotkey.
+        if bool(self.trails_chk["indicatorValue"]) != self.app.show_trails:
+            self.trails_chk["indicatorValue"] = int(self.app.show_trails)
 
         if self.app.selected_id != self._shown_id:
             self._shown_id = self.app.selected_id

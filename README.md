@@ -7,9 +7,10 @@ See **[REQUIREMENTS.md](REQUIREMENTS.md)** for the full vision, scope, and roadm
 
 > **Status:** Phase 1 MVP feature-complete. Engine-agnostic physics core (gravity,
 > symplectic integrator, collisions) with a passing test suite, plus a Panda3D window
-> with a starfield, PBR bodies, fading trails, an orbit camera, click-to-select, a HUD,
-> right-drag spawning, live editing, and JSON save/load. Photoreal textures are the
-> next step (the spheres are flat-shaded colours for now).
+> with a Milky Way skybox, photoreal textured PBR bodies (flat colours if the textures
+> are missing), fading trails, an orbit camera, click-to-select, an on-screen UI
+> (playback bar, scenario menu, body inspector), right-drag spawning, live editing, and
+> JSON save/load.
 
 ## Quick start
 
@@ -43,6 +44,10 @@ py -3.9 -m venv .venv
 | F5 / F9 | Save / load the scene (`universesim_save.json`) |
 | Esc | Quit |
 
+Everything is also on screen: the bottom bar (pause, speed, trails, reset), the
+top-left panel (scenario menu, **+ Add Body**, save/load), and the right-hand inspector
+(edit the selected body's name, mass, and radius — press Enter or **Apply** — then
+**Focus** to lock the camera onto it). Hotkeys are ignored while you're typing in a field.
 The HUD shows simulated time, body count, and time rate; selecting a body adds its
 mass, speed, and distance to the star. Bodies that touch **merge**, conserving mass
 and momentum.
